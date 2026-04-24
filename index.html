@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <!-- 
+    * Project: Asterisk HTML5 Port
+    * Author: Anirudha Chidumalla
+    * Date: 2026-04-23
+    * Description:
+    * A modern browser-based port of the classic C# WinForms "Asterisk" game.
+    * Features a state-driven arcade flow, AABB collision detection, and
+    * a modular glowing trail system utilizing historical position tracking.
+    * Architecture:
+    * - Frame-independent physics via requestAnimationFrame (delta time).
+    * - State Machine: [COLOR_SELECT] -> [START] -> [PLAYING] -> [GAMEOVER].
+    * - Rendering: HTML5 Canvas API with custom neon alpha-fading trails.
+    -->
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Asterisk HTML5 Port</title>
+    <style>
+        body {
+            background-color: #121212;
+            color: #ffffff;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+
+        canvas {
+            background-color: #000000;
+            box-shadow: 0 0 20px rgba(255, 255, 255, 0.1);
+            border-radius: 4px;
+        }
+
+        #ui {
+            margin-top: 20px;
+            text-align: center;
+            min-height: 30px;
+        }
+
+        h1 {
+            margin: 0 0 10px 0;
+            font-size: 24px;
+            letter-spacing: 2px;
+            color: #ffff00;
+        }
+
+        p {
+            margin: 5px 0;
+            color: #aaaaaa;
+        }
+
+        #statusText {
+            font-size: 18px;
+            font-weight: bold;
+            color: #00ff00;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>ASTERISK</h1>
+    <p>Hold [ENTER] to rise, release to fall.</p>
+    <canvas id="gameCanvas" width="600" height="400"></canvas>
+    <div id="ui">
+        <p id="statusText">Press [ENTER] to Start</p>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const statusText = document.getElementById('statusText');
+
+        const OBSTACLE_SIZE = 5;
+
+        // Game State Enums
+        const STATE = {
+            COLOR_SELECT: 0,
+            START: 1,
+            PLAYING: 2,
+            GAMEOVER: 3
+        };
+
+        // Core Game Variables
+        let currentState = STATE.COLOR_SELECT;
+        let lastTime = 0;
+        let level = 1;
+
+        // Color Selection
+        const playerColors = ['#ffff00', '#00ffff', '#ff00ff']; // Yellow, Cyan, Magenta
+        let selectedColorIndex = 0;
+
+        // Input tracking
+        let isEnterDown = false;
+
+        // Player properties (using 5x5 blocks as requested)
+        const player = {
+            x: 0,
+            y: canvas.height / 2,
+            width: 5,
+            height: 5,
+            baseSpeedX: 120, // Pixels per second
+            baseSpeedY: 120,
+            color: '#ffff00'
+        };
+
+        // Future-proofing: Trail history
+        let playerPath = [];
+        const maxPathLength = 60; // Store last 60 positions for a trail effect
+
+        // Environment
+        let obstacles = [];
+        const gapHeight = 60; // Size of the pass-through gap on the right wall
+        let gapTop = 0;
+        let gapBottom = 0;
+
+        // Listen for keyboard input
+        window.addEventListener('keydown', (e) => {
+            if (e.key === ' ') {
+                if (currentState === STATE.COLOR_SELECT) {
+                    // Space to cycle color
+                    selectedColorIndex = (selectedColorIndex + 1) % playerColors.length;
+                    draw();
+                } else if (currentState === STATE.START) {
+                    // Space to launch game
+                    startGame();
+                }
+            } else if (e.key === 'Enter') {
+                isEnterDown = true;
+
+                if (currentState === STATE.COLOR_SELECT) {
+                    // Enter confirms choice and moves to START (Ready to Launch)
+                    player.color = playerColors[selectedColorIndex];
+                    level = 1;
+                    initLevel();
+                    currentState = STATE.START;
+                    statusText.innerText = 'Press [SPACE] to Launch';
+                    statusText.style.color = player.color;
+                    draw();
+                }
+            }
+        });
+
+        window.addEventListener('keyup', (e) => {
+            if (e.key === 'Enter') {
+                isEnterDown = false;
+            }
+        });
+
+        function startGame() {
+            currentState = STATE.PLAYING;
+            statusText.innerText = `Level ${level}`;
+            statusText.style.color = '#ffffff';
+            lastTime = performance.now();
+            requestAnimationFrame(gameLoop);
+        }
+
+        function initLevel() {
+            player.x = 0;
+            player.y = canvas.height / 2;
+            playerPath = [];
+            obstacles = [];
+
+            // The gap is vertically centered on the right edge
+            gapTop = (canvas.height / 2) - (gapHeight / 2);
+            gapBottom = (canvas.height / 2) + (gapHeight / 2);
+
+            // Generate obstacles: scaled to match C# logic (3 per level on 300x200 -> 6 per level on 600x400)
+            const numObstacles = level * 6;
+
+            for (let i = 0; i < numObstacles; i++) {
+                // Ensure obstacles aren't spawning exactly where the player starts
+                // and give some padding on the edges.
+                let obX = 50 + Math.random() * (canvas.width - 80);
+                let obY = 10 + Math.random() * (canvas.height - 20);
+
+                obstacles.push({
+                    x: obX,
+                    y: obY,
+                    width: OBSTACLE_SIZE,
+                    height: OBSTACLE_SIZE
+                });
+            }
+            // Only update the level text if we are actively playing
+            // so we don't overwrite the "Press [SPACE] to Launch" text on initial load
+            if (currentState === STATE.PLAYING) {
+                statusText.innerText = `Level ${level}`;
+                statusText.style.color = '#ffffff';
+            }
+        }
+
+        function gameLoop(timestamp) {
+            if (currentState !== STATE.PLAYING) return;
+
+            // Calculate delta time in seconds, cap at 0.1s to prevent huge jumps if tab is inactive
+            let dt = (timestamp - lastTime) / 1000;
+            if (dt > 0.1) dt = 0.1;
+            lastTime = timestamp;
+
+            updateState(dt);
+            draw();
+
+            if (currentState === STATE.PLAYING) {
+                requestAnimationFrame(gameLoop);
+            }
+        }
+
+        function updateState(dt) {
+            // Speed increases slightly per level
+            const speedMultiplier = 1 + ((level - 1) * 0.1);
+            const currentSpeedX = player.baseSpeedX * speedMultiplier;
+            const currentSpeedY = player.baseSpeedY * speedMultiplier;
+
+            // Save current position for trails BEFORE moving
+            playerPath.push({ x: player.x, y: player.y });
+            if (playerPath.length > maxPathLength) {
+                playerPath.shift(); // Keep array bounded
+            }
+
+            // Move player X
+            player.x += currentSpeedX * dt;
+
+            // Move player Y (rise if Enter down, fall if released)
+            if (isEnterDown) {
+                player.y -= currentSpeedY * dt;
+            } else {
+                player.y += currentSpeedY * dt;
+            }
+
+            checkCollisions();
+        }
+
+        function checkCollisions() {
+            // 1. Check Floor and Ceiling (Top and Bottom Boundaries)
+            if (player.y < 0 || player.y + player.height > canvas.height) {
+                gameOver();
+                return;
+            }
+
+            // 2. Check Right Wall / Gap
+            if (player.x + player.width >= canvas.width) {
+                // Did we pass cleanly through the gap?
+                if (player.y >= gapTop && player.y + player.height <= gapBottom) {
+                    level++;
+                    initLevel();
+                    return;
+                } else {
+                    gameOver();
+                    return;
+                }
+            }
+
+            // 3. Check Obstacles (AABB Collision)
+            for (let obs of obstacles) {
+                if (
+                    player.x < obs.x + obs.width &&
+                    player.x + player.width > obs.x &&
+                    player.y < obs.y + obs.height &&
+                    player.y + player.height > obs.y
+                ) {
+                    gameOver();
+                    return;
+                }
+            }
+        }
+
+        function gameOver() {
+            currentState = STATE.COLOR_SELECT;
+            draw();
+        }
+
+        function draw() {
+            // Clear canvas
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            if (currentState === STATE.COLOR_SELECT) {
+                statusText.innerText = 'Press [SPACE] to cycle, [ENTER] to start';
+                statusText.style.color = '#ffffff';
+
+                ctx.fillStyle = '#ffffff';
+                ctx.font = '24px "Segoe UI"';
+                ctx.textAlign = 'center';
+                ctx.fillText('SELECT PLAYER COLOR', canvas.width / 2, canvas.height / 2 - 60);
+
+                const swatchSize = 40;
+                const spacing = 80;
+                const startX = canvas.width / 2 - spacing; // Center 3 swatches
+
+                for (let i = 0; i < playerColors.length; i++) {
+                    ctx.fillStyle = playerColors[i];
+                    let x = startX + (i * spacing) - swatchSize / 2;
+                    let y = canvas.height / 2 - swatchSize / 2;
+                    ctx.fillRect(x, y, swatchSize, swatchSize);
+
+                    // Draw highlight around selected color
+                    if (i === selectedColorIndex) {
+                        ctx.strokeStyle = '#ffffff';
+                        ctx.lineWidth = 3;
+                        ctx.strokeRect(x - 6, y - 6, swatchSize + 12, swatchSize + 12);
+                    }
+                }
+                return; // Stop drawing rest of game
+            }
+
+            // Draw Boundaries (Top, Bottom)
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, canvas.width, 1); // Top
+            ctx.fillRect(0, canvas.height - 1, canvas.width, 1); // Bottom
+
+            // Draw Right Boundary with Gap
+            // Top part of right wall
+            ctx.fillRect(canvas.width - 1, 0, 1, gapTop);
+            // Bottom part of right wall
+            ctx.fillRect(canvas.width - 1, gapBottom, 1, canvas.height - gapBottom);
+
+            // Draw Obstacles
+            ctx.fillStyle = '#ffffff';
+            for (let obs of obstacles) {
+                ctx.fillRect(obs.x, obs.y, obs.width, obs.height);
+            }
+
+            // --- Glowing Trail Rendering ---
+            ctx.shadowBlur = 10;
+            ctx.shadowColor = player.color;
+            for (let i = 0; i < playerPath.length; i++) {
+                const pos = playerPath[i];
+                // Fade logic: older positions (lower i) have lower opacity.
+                // i / playerPath.length creates a linear fade from 0 (transparent) to 1 (opaque).
+                const alpha = i / playerPath.length;
+                ctx.globalAlpha = alpha;
+                ctx.fillStyle = player.color;
+                ctx.fillRect(pos.x, pos.y, player.width, player.height);
+            }
+            ctx.globalAlpha = 1.0; // Reset alpha
+            ctx.shadowBlur = 0; // Reset so obstacles and player don't glow
+
+            // Draw Player
+            ctx.fillStyle = player.color;
+            ctx.fillRect(player.x, player.y, player.width, player.height);
+        }
+
+        // Initial draw for START state
+        draw();
+    </script>
+</body>
+
+</html>
